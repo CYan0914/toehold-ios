@@ -1,5 +1,14 @@
 import Foundation
 
+// `canImport` below tests whether the framework exists in the SDK; it does not
+// bring anything into scope. Without this import the guard passes and every
+// name inside it is still an error -- which is exactly how this failed the
+// first CI run: "cannot find 'SystemLanguageModel' in scope" at the line the
+// `#if` was supposed to be protecting.
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
 /// Picks the generator. This is the only place in the app that knows two
 /// implementations exist, and the only place that checks device capability.
 ///
