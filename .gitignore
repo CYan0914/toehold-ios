@@ -1,0 +1,33 @@
+# The Xcode project is generated from project.yml by `xcodegen generate`, so it
+# is never committed. Committing it would make every merge a conflict in a file
+# nobody edits by hand, and the generated file would silently drift from the
+# spec it is supposed to be built from.
+*.xcodeproj
+*.xcworkspace
+
+# Build products. `ci/capture_screenshots.sh` reads from this path.
+build/
+DerivedData/
+*.xcarchive
+
+# Screenshot output from the CI job.
+ci/out/
+
+# Xcode per-user state, rewritten constantly and never meaningful in a diff.
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# macOS
+.DS_Store
+._*
+
+# gstack's browse daemon writes its runtime state here (logs, audit jsonl,
+# network captures). Machine-local, changes on every browse call.
+.gstack/
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved

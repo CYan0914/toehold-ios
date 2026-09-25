@@ -1,0 +1,657 @@
+name: Build Toehold
+
+# One workflow, two jobs. A compile check and an archive split across two files
+# are two things to watch, and the way that fails is watching the wrong one and
+# believing a build succeeded.
+#
+# The default dispatch -- and every push -- is a simulator compile plus the unit
+# tests. The archive job runs only when `create_ipa` is explicitly true, so the
+# expensive path is never taken by accident.
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_ipa:
+        description: 'Build a signed IPA and upload it to TestFlight'
+        required: false
+        default: false
+        type: boolean
+      screenshots:
+        description: 'Capture App Store screenshots (6.5" iPhone + 13" iPad)'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+
+# The compile check and the archive are different jobs with different costs,
+# and grouping them together means dispatching an archive cancels the compile
+# that was already running. The result is a build that shows as cancelled and
+# tells you nothing, right when you are most likely to be watching it. The
+# `create_ipa` input is part of the key for that reason, so a push and a
+# dispatch never evict each other.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{
+    github.event.inputs.create_ipa || '0' }}-${{
+    github.event.inputs.screenshots || '0' }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Compile check and tests (the default) ────────────────────────────────
+  build:
+    name: Build and test for iOS Simulator
+    if: |
+      github.event_name == 'push' ||
+      (github.event.inputs.create_ipa != 'true' && github.event.inputs.screenshots != 'true')
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (26+ required for App Store uploads)
+        run: |
+          echo "=== Available Xcode ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none found)"
+          for xc in /Applications/Xcode*.app; do
+            if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
+              sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
+              echo "  $xc -> iOS SDK $sdk"
+              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+                echo "Selected: $xc (iOS SDK $sdk)"
+                xcodebuild -version
+                exit 0
+              fi
+            fi
+          done
+          echo "No Xcode with SDK 26+ found -- falling back"
+          xcodebuild -version
+
+      - name: Install xcodegen
+        run: |
+          brew install xcodegen 2>/dev/null || brew upgrade xcodegen 2>/dev/null
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: |
+          # Nothing is committed to generate over, but a stale directory from a
+          # cached runner would carry an older Xcode format than the one
+          # selected above, and xcodebuild refuses to open it.
+          rm -rf Toehold.xcodeproj
+          xcodegen generate
+
+      - name: Ensure the iOS platform is installed
+        run: |
+          sudo xcodebuild -license accept 2>&1 || true
+          sudo xcodebuild -runFirstLaunch 2>&1 || true
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            sudo xcodebuild -downloadPlatform iOS -quiet 2>&1 && break
+            echo "Attempt $i failed, sleeping 10s..."
+            sleep 10
+          done
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version || echo "iphoneos SDK not found"
+
+      - name: Build for Simulator
+        run: |
+          # Unsigned on purpose: this job answers "does it compile", and pulling
+          # signing credentials in would make a code error and a certificate
+          # problem look the same.
+          #
+          # The log goes to a file rather than straight through xcpretty, because
+          # xcpretty drops the body of tool errors -- an actool failure came back
+          # as "CompileAssetCatalogVariant ... failed" with no reason in it, and
+          # the reason is the only part worth having. Hearth paid for that one.
+          set +e
+          xcodebuild build \
+            -project Toehold.xcodeproj \
+            -scheme Toehold \
+            -sdk iphonesimulator \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            > build.log 2>&1
+          status=$?
+          set -e
+
+          if [ $status -ne 0 ]; then
+            echo "::group::errors"
+            grep -nE "error:|error :|fatal" build.log | head -60 || true
+            echo "::endgroup::"
+            echo "::group::last 100 lines of the raw log"
+            tail -100 build.log
+            echo "::endgroup::"
+            exit $status
+          fi
+          xcpretty < build.log
+
+      # The tests are the reason this job exists at all. `WallClock` and the
+      # three-state PATCH encoding are pure functions whose failure mode is
+      # silence: no crash, no red build, and no sign on the developer's own
+      # phone -- just a dose shown at the wrong hour to a relative in another
+      # timezone. Nothing else in the pipeline can catch that.
+      - name: Run unit tests
+        run: |
+          # The simulator is found rather than named. Runners get their device
+          # list refreshed with each Xcode, so pinning "iPhone 16" works right
+          # up until it doesn't -- and the failure then reads like a test
+          # failure rather than a missing device.
+          #
+          # Kept to grep rather than an inline python script on purpose: a
+          # multi-line program inside a `run: |` block has to be indented past
+          # the block's own indent or YAML ends the scalar early, and GitHub
+          # reports that as a workflow file error with no line number.
+          UDID=$(xcrun simctl list devices available \
+            | grep -m1 -E "iPhone" \
+            | grep -oE "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
+          if [ -z "$UDID" ]; then
+            echo "::error::no available iPhone simulator on this runner"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Using simulator $UDID"
+
+          set +e
+          xcodebuild test \
+            -project Toehold.xcodeproj \
+            -scheme Toehold \
+            -destination "id=$UDID" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            > test.log 2>&1
+          status=$?
+          set -e
+
+          # Failures are quoted out of the raw log before it is summarised. The
+          # interesting line is the assertion message, and it is buried.
+          grep -nE "error:|failed|XCTAssert" test.log | head -40 || true
+          if [ $status -ne 0 ]; then
+            echo "::group::last 120 lines"
+            tail -120 test.log
+            echo "::endgroup::"
+            exit $status
+          fi
+          grep -E "Test Suite|Executed .* test" test.log | tail -20 || true
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build.log
+            test.log
+          retention-days: 7
+
+  # ─── Signed archive, uploaded to TestFlight (only when asked) ─────────────
+  #
+  # This job is the only way an App Store build is produced. The job above
+  # answers "does it compile" cheaply and unsigned on every push; this one
+  # needs a signing identity, a freshly issued provisioning profile and an
+  # upload, so it runs only when `create_ipa` is true.
+  #
+  # They live in one file deliberately. A compile check and an archive split
+  # across two workflows are two things to watch, and the way that goes wrong
+  # is watching the wrong one and believing a build succeeded.
+  archive:
+    name: Archive and upload to TestFlight
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.create_ipa == 'true'
+    # Generous but finite: a normal archive is 15-20 minutes, and the expensive
+    # failure mode here is not a slow build but a build that never ends --
+    # which spends macOS minutes and, worse, reports nothing.
+    timeout-minutes: 90
+    runs-on: macos-latest
+
+    env:
+      # These let xcodebuild talk to Apple without a logged-in Xcode, which is
+      # the only way this works on a runner. It matters more here than usual:
+      # the App ID's capabilities were changed, so the provisioning profile is
+      # issued during this build rather than reused from anywhere.
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (26+ required for App Store uploads)
+        run: |
+          echo "=== Available Xcode ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none found)"
+          for xc in /Applications/Xcode*.app; do
+            if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
+              sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
+              echo "  $xc -> iOS SDK $sdk"
+              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+                echo "Selected: $xc (iOS SDK $sdk)"
+                xcodebuild -version
+                exit 0
+              fi
+            fi
+          done
+          echo "No Xcode with SDK 26+ found -- falling back"
+          xcodebuild -version
+
+      - name: Install xcodegen
+        run: |
+          brew install xcodegen 2>/dev/null || brew upgrade xcodegen 2>/dev/null
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: |
+          rm -rf Toehold.xcodeproj
+          xcodegen generate
+
+      - name: Ensure the iOS platform is installed
+        run: |
+          # `macos-latest` is a moving target, and so is what it happens to
+          # have preinstalled. A runner that ships Xcode 26 without the iOS 26
+          # platform selects cleanly and then fails at the archive with
+          #
+          #     Unable to find a destination matching the provided destination
+          #     specifier ... error: iOS 26.0 is not installed
+          #
+          # which reads like a scheme or destination problem and is neither.
+          # The platform is installed here rather than trusted, so whether the
+          # archive succeeds is not a matter of which runner it landed on.
+          sudo xcodebuild -license accept 2>&1 || true
+          sudo xcodebuild -runFirstLaunch 2>&1 || true
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            # No pipe on the xcodebuild call itself: `cmd | tail` returns
+            # tail's exit status, so a failing download would look like a
+            # success and the loop would stop retrying on the first try.
+            sudo xcodebuild -downloadPlatform iOS -quiet 2>&1 && break
+            echo "Attempt $i failed, sleeping 15s..."
+            sleep 15
+          done
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version || echo "iphoneos SDK not found"
+
+      - name: Install the App Store Connect API key
+        env:
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: |
+          mkdir -p "$HOME/private_keys"
+          printf '%s' "$ASC_KEY_P8_BASE64" | base64 --decode \
+            > "$HOME/private_keys/AuthKey_$ASC_KEY_ID.p8"
+          chmod 600 "$HOME/private_keys/AuthKey_$ASC_KEY_ID.p8"
+          # A truncated decode produces a signing failure that reads like a
+          # permissions problem, so the size is printed rather than assumed.
+          # Only the header line ever reaches the log -- never the key body.
+          head -1 "$HOME/private_keys/AuthKey_$ASC_KEY_ID.p8"
+          echo "key bytes: $(wc -c < "$HOME/private_keys/AuthKey_$ASC_KEY_ID.p8")"
+
+      - name: Install the distribution certificate
+        env:
+          DIST_P12_BASE64: ${{ secrets.DIST_P12_BASE64 }}
+          DIST_P12_PASSWORD: ${{ secrets.DIST_P12_PASSWORD }}
+        run: |
+          # A fresh runner's keychain holds no distribution identity, and the
+          # team is at Apple's ceiling of three distribution certificates, so
+          # one cannot be minted. Importing the one the team already has costs
+          # nothing and revokes nothing: an Apple Distribution certificate is
+          # issued to the team, not to an app, so the same one signs Toehold's
+          # profile and every other app's.
+          #
+          # Importing the certificate is necessary but not sufficient. Manual
+          # signing has to find an identity in the keychain to sign with, and
+          # without this there is none -- but a certificate alone does not stop
+          # automatic signing from trying to negotiate its own profile, which
+          # is what the Archive step below disables explicitly.
+          KEYCHAIN="$RUNNER_TEMP/toehold-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Locked again after an hour rather than at the end of the job: a
+          # keychain that outlives the build on a shared runner is a keychain
+          # in someone else's build.
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          printf '%s' "$DIST_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" \
+            -P "$DIST_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/xcodebuild
+
+          # Overwrite the decoded key material immediately; it has served its
+          # purpose and the job no longer needs a copy of it on disk.
+          rm -f "$RUNNER_TEMP/dist.p12"
+
+          # The identities are listed rather than assumed. An import that
+          # produces no usable identity fails the same way as a missing
+          # certificate, one step later and with a worse error message.
+          echo "--- signing identities ---"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+          # Read out rather than hardcoded. The team's certificate is named
+          # "iPhone Distribution: ..." (the older spelling), and a build that
+          # asks for the newer "Apple Distribution" can fail to match it --
+          # which surfaces as "no signing certificate found", pointing at the
+          # certificate that is right there in the keychain.
+          SIGN_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | sed -n 's/^[^"]*"\(.*\)"[[:space:]]*$/\1/p' | head -1)
+          if [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::no codesigning identity was imported"
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "will sign with: $SIGN_IDENTITY"
+
+          # Without this, codesign blocks on a keychain prompt that nobody is
+          # present to answer, and the build hangs until it times out.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security default-keychain -s "$KEYCHAIN"
+
+      - name: Install the provisioning profile
+        env:
+          PROFILE_BASE64: ${{ secrets.PROFILE_BASE64 }}
+        run: |
+          # The certificate alone did not fix the export. It kept failing with
+          #
+          #     Cloud signing permission error
+          #     No profiles for 'com.cyan0914.toehold' were found
+          #
+          # even though a valid profile existed in App Store Connect the whole
+          # time. That is the tell: Xcode's automatic signing does not go
+          # looking for a profile that already exists -- it asks the cloud
+          # signing service to *make* one, and when that service declines, the
+          # error names the bundle id instead of the service. The key is not at
+          # fault; it created this very profile over the API.
+          #
+          # So the cloud signing service is taken out of the path. The profile
+          # is installed where Xcode looks for it on disk and named explicitly,
+          # which is what manual signing means.
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          printf '%s' "$PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/toehold.mobileprovision"
+
+          security cms -D -i "$RUNNER_TEMP/toehold.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")
+
+          cp "$RUNNER_TEMP/toehold.mobileprovision" \
+             "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "installed profile '$PROFILE_NAME' ($PROFILE_UUID)"
+
+          # Read out of the profile rather than hardcoded: a rename in the
+          # portal would otherwise surface as a signing failure pointing at the
+          # bundle id, which is the wrong place to go looking.
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
+
+          # Both of the things the next two steps assume, checked here so a bad
+          # profile fails next to the profile instead of inside a xcodebuild log
+          # long enough that the actual error scrolls away.
+          #
+          # iCloud is the one capability this app cannot ship without: without
+          # it the container falls back to local-only, the app runs fine, and
+          # nothing ever syncs. Enabling the capability in the portal does NOT
+          # retroactively add it to an existing profile -- the profile has to be
+          # regenerated and re-exported, and a stale secret here is the most
+          # likely way this build fails.
+          /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.icloud-container-identifiers' \
+            "$RUNNER_TEMP/profile.plist" > /dev/null \
+            || { echo "::error::the profile does not carry the iCloud container entitlement"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' \
+            "$RUNNER_TEMP/profile.plist" | grep -q "com.cyan0914.toehold" \
+            || { echo "::error::the profile is for a different bundle id"; exit 1; }
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          # Manual signing, and no -allowProvisioningUpdates: the profile is on
+          # disk and named, so there is nothing left for Xcode to negotiate.
+          # Automatic signing previously "succeeded" here by signing with a
+          # development identity, which is why the archive passed and the export
+          # then could not re-sign it.
+          xcodebuild archive \
+            -project Toehold.xcodeproj \
+            -scheme Toehold \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/Toehold.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            DEVELOPMENT_TEAM=H4VQ9X6KYK \
+            > archive.log 2>&1 || {
+              echo "::group::archive errors"
+              grep -nE "error:|error :|fatal" archive.log | head -40 || true
+              echo "::endgroup::"
+              echo "::group::last 80 lines"
+              tail -80 archive.log
+              echo "::endgroup::"
+              exit 1
+            }
+          tail -20 archive.log
+
+      - name: Verify the archive carries the iCloud entitlements
+        run: |
+          # Every one of these failure modes is silent in the built app. A
+          # missing iCloud entitlement compiles, installs, launches and passes
+          # review; the container just falls back to a local store and no task
+          # ever reaches a second device. Nobody files that as a bug, because
+          # nothing looks broken. So it is checked, not trusted.
+          APP="$RUNNER_TEMP/Toehold.xcarchive/Products/Applications/Toehold.app"
+          codesign -d --entitlements :- "$APP" > entitlements.xml 2>/dev/null || true
+          cat entitlements.xml
+
+          # The entitlement file is the request and the profile is the ceiling;
+          # what gets signed is the request. Checking the signed archive (not
+          # the source file) is what proves the two agreed.
+          if ! grep -q "com.apple.developer.icloud-container-identifiers" entitlements.xml; then
+            echo "::error::archive is missing the iCloud container entitlement -- nothing will ever sync"
+            exit 1
+          fi
+          if ! grep -q "iCloud.com.cyan0914.toehold" entitlements.xml; then
+            echo "::error::archive names the wrong iCloud container"
+            exit 1
+          fi
+
+          # CloudKit rather than key-value store. The two are separate
+          # entitlements and declaring the container without naming the service
+          # produces a signature that authorises nothing -- the container id is
+          # present and useless.
+          if ! grep -A3 "icloud-services" entitlements.xml | grep -q "CloudKit"; then
+            echo "::error::archive does not declare the CloudKit iCloud service"
+            exit 1
+          fi
+          echo "iCloud container, container id and CloudKit service are all present."
+
+      - name: Export and upload to TestFlight
+        run: |
+          set -o pipefail
+          # The resolved inputs, printed before anything can fail. Every one of
+          # these is inherited from a step above, and a failure caused by one of
+          # them being empty is indistinguishable from a failure caused by
+          # Apple, unless the values are on the record.
+          echo "PROFILE_NAME='$PROFILE_NAME'"
+          echo "SIGN_IDENTITY='$SIGN_IDENTITY'"
+          echo "ASC_KEY_ID='$ASC_KEY_ID'"
+          echo "installed profiles:"
+          ls -1 "$HOME/Library/MobileDevice/Provisioning Profiles/" 2>/dev/null || echo "  (none)"
+
+          # Generated rather than committed so the profile name in it cannot
+          # drift from the profile actually installed two steps up. ci/
+          # ExportOptions.plist is kept as the documented shape of this file.
+          OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy \
+            -c "Add :method string app-store-connect" \
+            -c "Add :destination string upload" \
+            -c "Add :teamID string H4VQ9X6KYK" \
+            -c "Add :signingStyle string manual" \
+            -c "Add :uploadSymbols bool true" \
+            -c "Add :manageAppVersionAndBuildNumber bool false" \
+            -c "Add :provisioningProfiles dict" \
+            -c "Add :provisioningProfiles:com.cyan0914.toehold string $PROFILE_NAME" \
+            "$OPTIONS" || {
+              echo "::error::could not write ExportOptions.plist"
+              exit 1
+            }
+          plutil -p "$OPTIONS"
+
+          KEY="$HOME/private_keys/AuthKey_$ASC_KEY_ID.p8"
+          if [ ! -s "$KEY" ]; then
+            echo "::error::no App Store Connect key at $KEY"
+            exit 1
+          fi
+
+          # The authentication key stays: it is what uploads to TestFlight.
+          # -allowProvisioningUpdates goes, because there is nothing to update.
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Toehold.xcarchive" \
+            -exportOptionsPlist "$OPTIONS" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -authenticationKeyPath "$KEY" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            > export.log 2>&1 || {
+              # The whole log, and the surrounding state. Selecting "error:"
+              # lines out of export.log was the previous behaviour and it was
+              # the wrong shape twice over: xcodebuild reports some failures
+              # without the word "error" at all, and if the step died before
+              # xcodebuild ran there is no export.log to grep -- so the output
+              # was empty and said nothing about which of the two had happened.
+              echo "::group::export.log"
+              if [ -f export.log ]; then
+                cat export.log
+              else
+                echo "(export.log was never created -- the failure was before xcodebuild)"
+              fi
+              echo "::endgroup::"
+              echo "::group::signing state"
+              # No keychain argument: the keychain step ran
+              # `security default-keychain -s`, so the default is the right one,
+              # and `$KEYCHAIN` is a shell variable local to that earlier step
+              # rather than something exported here. Passing it empty searches
+              # nothing and reports an empty identity list, which reads like the
+              # certificate having gone missing.
+              security find-identity -v -p codesigning || true
+              ls -la "$HOME/Library/MobileDevice/Provisioning Profiles/" || true
+              echo "::endgroup::"
+              exit 1
+            }
+          tail -30 export.log
+
+      - name: Upload archive logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-logs
+          path: |
+            archive.log
+            export.log
+            entitlements.xml
+          retention-days: 7
+
+  # ─── App Store screenshots (only when asked) ──────────────────────────────
+  #
+  # A submission needs screenshots and there were none, so this produces them
+  # from the app itself rather than from mockups: one launch per screen with
+  # `-ToeholdDemo`, and the picture is whatever the real view renders.
+  #
+  # The compile job's output is reused rather than rebuilt, so this is a
+  # capture run and not a second build.
+  screenshots:
+    name: Capture App Store screenshots
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.screenshots == 'true'
+    runs-on: macos-latest
+    # Bounded, because this job drives a simulator and a wedged simulator is
+    # not an error -- it is silence. A capture step that normally takes 19
+    # minutes sat at 38 with no output and no failure, and without a cap it
+    # would have held the run open for six hours while looking like work.
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode (26+ required for App Store uploads)
+        run: |
+          echo "=== Available Xcode ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none found)"
+          for xc in /Applications/Xcode*.app; do
+            if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
+              sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
+              echo "  $xc -> iOS SDK $sdk"
+              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+                echo "Selected: $xc (iOS SDK $sdk)"
+                xcodebuild -version
+                exit 0
+              fi
+            fi
+          done
+          echo "No Xcode with SDK 26+ found -- falling back"
+          xcodebuild -version
+
+      - name: Install xcodegen
+        run: |
+          brew install xcodegen 2>/dev/null || brew upgrade xcodegen 2>/dev/null
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: |
+          rm -rf Toehold.xcodeproj
+          xcodegen generate
+
+      - name: Ensure the iOS platform is installed
+        run: |
+          sudo xcodebuild -license accept 2>&1 || true
+          sudo xcodebuild -runFirstLaunch 2>&1 || true
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            sudo xcodebuild -downloadPlatform iOS -quiet 2>&1 && break
+            echo "Attempt $i failed, sleeping 15s..."
+            sleep 15
+          done
+          xcrun --sdk iphonesimulator --show-sdk-version || echo "simulator SDK not found"
+
+      - name: Build for Simulator
+        run: |
+          # Debug, and into a known directory. Debug because the capture run
+          # has no reason to pay for whole-module optimisation, and no banner
+          # or ribbon is gated on the configuration -- the demo is selected by
+          # launch argument, in either configuration. The path matters because
+          # the capture script looks there.
+          set +e
+          xcodebuild build \
+            -project Toehold.xcodeproj \
+            -scheme Toehold \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            > build.log 2>&1
+          status=$?
+          set -e
+          if [ $status -ne 0 ]; then
+            echo "::group::errors"
+            grep -nE "error:|error :|fatal" build.log | head -40 || true
+            echo "::endgroup::"
+            tail -60 build.log
+            exit $status
+          fi
+
+      - name: Capture
+        run: |
+          chmod +x ci/capture_screenshots.sh
+          bash ci/capture_screenshots.sh
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: appstore-screenshots
+          path: shots/
+          if-no-files-found: error
+          retention-days: 30

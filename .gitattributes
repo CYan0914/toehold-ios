@@ -1,0 +1,28 @@
+# LF in the repo, always. Windows' autocrlf would otherwise store CRLF and
+# check it out as CRLF, which breaks two things here rather than being cosmetic:
+#
+#   * ci/capture_screenshots.sh runs on macOS. A CRLF shebang line makes the
+#     interpreter name "#!/bin/bash\r", which is a file that does not exist, so
+#     the script fails before its first statement.
+#   * The .yml workflow is parsed by GitHub, and CRLF in YAML is tolerated but
+#     shows the whole file as changed on every edit made from a different OS.
+#
+# `text=auto` normalises on commit; the explicit `eol=lf` entries keep checkout
+# LF as well, so a script written here works there without a re-save.
+* text=auto
+
+*.sh          text eol=lf
+*.py          text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.plist       text eol=lf
+*.swift       text eol=lf
+*.entitlements text eol=lf
+*.json        text eol=lf
+*.md          text eol=lf
+
+# Real binaries. Without this they are treated as text and "normalised", which
+# corrupts the PNG bytes.
+*.png         binary
+*.jpg         binary
+*.pdf         binary

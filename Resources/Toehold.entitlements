@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- CloudKit sync. Two devices on one iCloud account see the same tasks
+	     because of these three keys, and the failure mode when they are wrong
+	     is quiet: ModelContainer falls back to a local-only store, the app runs
+	     fine, and nothing ever syncs. No error, no log line.
+
+	     There are three separate things named here and all three have to agree
+	     with the App ID before this signs:
+	       - the capability must be enabled on the App ID
+	       - the container below must exist in the team's container list
+	       - the provisioning profile must carry the entitlement
+
+	     That last one is the trap. Enabling the capability in the portal does
+	     NOT update an existing profile; the profile has to be regenerated and
+	     re-exported, or the signing step fails. A local debug build can appear
+	     to work because Xcode manages its own profile -- CI will not.
+
+	     `iCloud.com.cyan0914.toehold` matches the bundle identifier so there is
+	     one name to keep straight rather than two. -->
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array>
+		<string>iCloud.com.cyan0914.toehold</string>
+	</array>
+	<key>com.apple.developer.icloud-services</key>
+	<array>
+		<string>CloudKit</string>
+	</array>
+
+	<!-- Key-value store for the small scalar preferences that would otherwise
+	     round-trip through CloudKit for no reason. Separate from the container
+	     above: this one is capped at 1 MB and is not where task data goes. -->
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>$(TeamIdentifierPrefix)$(CFBundleIdentifier)</string>
+</dict>
+</plist>
