@@ -133,7 +133,8 @@ struct TaskStoreTests {
 
         store.markComplete(task)
 
-        #expect(task.orderedSteps.allSatisfy(\.done))
+        #expect(task.orderedSteps.count == drafts.count)
+        #expect(task.orderedSteps.filter(\.done).count == drafts.count)
         #expect(task.completedAt != nil)
     }
 
