@@ -51,11 +51,27 @@ struct AIStepGenerator: StepGenerator {
         } catch let error as StepGeneratorError {
             // Already in our vocabulary — `emptyResult` arrives here.
             throw error
+        } catch let error as LanguageModelSession.GenerationError {
+            switch error {
+            case .assetsUnavailable:
+                // The device says Apple Intelligence is on, but the model
+                // weights are not actually on disk yet -- a fresh device still
+                // downloading them, or a simulator that will never have them.
+                // This is the availability check's blind spot: it reads the
+                // feature flag, not the assets. Reporting it as retryable would
+                // be a lie, because nothing the person does makes the download
+                // finish, so it is mapped to the unavailability case and the
+                // caller falls back to templates.
+                throw StepGeneratorError.modelUnavailable
+            default:
+                throw StepGeneratorError.generationFailed(underlying: error)
+            }
         } catch {
-            // `LanguageModelError` is a @nonexhaustive enum, so it cannot be
-            // switched over without a default; every case it can raise is
-            // retryable, so they all collapse into one case with the original
-            // attached for logging rather than being enumerated.
+            // Anything else: rate limit, timeout, context overflow, guardrail
+            // trip. `GenerationError` is @nonexhaustive so it cannot be
+            // exhaustively switched over; the cases not named above do not
+            // change what the caller should do, so they collapse into one
+            // retryable case with the original attached for logging.
             throw StepGeneratorError.generationFailed(underlying: error)
         }
         #else
