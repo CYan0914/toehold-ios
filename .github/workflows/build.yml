@@ -79,7 +79,23 @@ jobs:
           #
           # Sorted by version rather than taken first, so this picks 26.6 on a
           # runner that has it and shoulders aside a stale oldest install.
-          mapfile -t XCODES < <(ls -d /Applications/Xcode*.app 2>/dev/null |             sed 's|/Applications/Xcode[_]*||; s|\.app$||' |             awk '{print}' | sort -Vr | sed 's|^|/Applications/Xcode_|; s|$|.app|')
+          #
+          # No `mapfile` here on purpose: the macOS runner's /bin/bash is 3.2,
+          # where it does not exist. The failure is `mapfile: command not found`
+          # on the first line with exit 127 -- the step dies before it lists a
+          # single Xcode, which reads like the step itself is broken rather than
+          # like an unsupported builtin. A command substitution into a plain
+          # array is portable and the same length.
+          #
+          # `Xcode.app` carries no version and would round-trip into
+          # `/Applications/Xcode_.app`, a path that does not exist. Dropping it
+          # by name is cheaper than carrying a path-resolves check into both
+          # loops below.
+          XCODES=($(ls -d /Applications/Xcode*.app 2>/dev/null \
+            | grep -v '^/Applications/Xcode\.app$' \
+            | sed 's|/Applications/Xcode[_]*||; s|\.app$||' \
+            | sort -Vr \
+            | sed 's|^|/Applications/Xcode_|; s|$|.app|'))
 
           for xc in "${XCODES[@]}"; do
             [ -d "$xc" ] || continue
@@ -372,7 +388,23 @@ jobs:
           #
           # Sorted by version rather than taken first, so this picks 26.6 on a
           # runner that has it and shoulders aside a stale oldest install.
-          mapfile -t XCODES < <(ls -d /Applications/Xcode*.app 2>/dev/null |             sed 's|/Applications/Xcode[_]*||; s|\.app$||' |             awk '{print}' | sort -Vr | sed 's|^|/Applications/Xcode_|; s|$|.app|')
+          #
+          # No `mapfile` here on purpose: the macOS runner's /bin/bash is 3.2,
+          # where it does not exist. The failure is `mapfile: command not found`
+          # on the first line with exit 127 -- the step dies before it lists a
+          # single Xcode, which reads like the step itself is broken rather than
+          # like an unsupported builtin. A command substitution into a plain
+          # array is portable and the same length.
+          #
+          # `Xcode.app` carries no version and would round-trip into
+          # `/Applications/Xcode_.app`, a path that does not exist. Dropping it
+          # by name is cheaper than carrying a path-resolves check into both
+          # loops below.
+          XCODES=($(ls -d /Applications/Xcode*.app 2>/dev/null \
+            | grep -v '^/Applications/Xcode\.app$' \
+            | sed 's|/Applications/Xcode[_]*||; s|\.app$||' \
+            | sort -Vr \
+            | sed 's|^|/Applications/Xcode_|; s|$|.app|'))
 
           for xc in "${XCODES[@]}"; do
             [ -d "$xc" ] || continue
@@ -824,7 +856,23 @@ jobs:
           #
           # Sorted by version rather than taken first, so this picks 26.6 on a
           # runner that has it and shoulders aside a stale oldest install.
-          mapfile -t XCODES < <(ls -d /Applications/Xcode*.app 2>/dev/null |             sed 's|/Applications/Xcode[_]*||; s|\.app$||' |             awk '{print}' | sort -Vr | sed 's|^|/Applications/Xcode_|; s|$|.app|')
+          #
+          # No `mapfile` here on purpose: the macOS runner's /bin/bash is 3.2,
+          # where it does not exist. The failure is `mapfile: command not found`
+          # on the first line with exit 127 -- the step dies before it lists a
+          # single Xcode, which reads like the step itself is broken rather than
+          # like an unsupported builtin. A command substitution into a plain
+          # array is portable and the same length.
+          #
+          # `Xcode.app` carries no version and would round-trip into
+          # `/Applications/Xcode_.app`, a path that does not exist. Dropping it
+          # by name is cheaper than carrying a path-resolves check into both
+          # loops below.
+          XCODES=($(ls -d /Applications/Xcode*.app 2>/dev/null \
+            | grep -v '^/Applications/Xcode\.app$' \
+            | sed 's|/Applications/Xcode[_]*||; s|\.app$||' \
+            | sort -Vr \
+            | sed 's|^|/Applications/Xcode_|; s|$|.app|'))
 
           for xc in "${XCODES[@]}"; do
             [ -d "$xc" ] || continue
