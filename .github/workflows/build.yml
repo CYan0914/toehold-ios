@@ -186,6 +186,22 @@ jobs:
             test.log
           retention-days: 7
 
+      # `test.log` says a run "restarted after unexpected exit, crash, or test
+      # timeout" and nothing more -- Swift Testing reports the restart, not the
+      # reason, so the log names which test died and never why. The stack and
+      # the failing frame are only in the xcresult bundle, which is written to
+      # DerivedData rather than the workspace, so it has to be found rather
+      # than named. Uploaded only on failure: a green run's bundle is tens of
+      # megabytes nobody will open.
+      - name: Upload test results (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-xcresult
+          path: ~/Library/Developer/Xcode/DerivedData/Toehold-*/Logs/Test/*.xcresult
+          retention-days: 7
+          if-no-files-found: warn
+
   # ─── Signed archive, uploaded to TestFlight (only when asked) ─────────────
   #
   # This job is the only way an App Store build is produced. The job above
