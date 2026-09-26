@@ -7,31 +7,41 @@ import Testing
 /// matches how the app uses it — every call comes from a view.
 @MainActor
 struct TaskStoreTests {
-    /// Each store gets its own store file, and that is the whole point.
+    /// A container with CloudKit switched off, and off is the whole point.
     ///
-    /// This used to be `ModelConfiguration(schema:isStoredInMemoryOnly: true)`
-    /// with no `url`. Every test built its own container, and with no url each
-    /// one derived the same default path from the same schema — so eight
-    /// containers were pointed at one store. The observable symptom was a test
-    /// process that died the instant a `TaskStoreTests` case started, printing
-    /// nothing: no assertion failure, no error, not even the test's own name in
-    /// the run log. `TaskStore.save()` swallows a throwing `context.save()`
-    /// into `assertionFailure`, which traps in a Debug build, so a failed save
-    /// is a silent kill rather than a reported one.
+    /// `cloudKitDatabase` defaults to `.automatic`, which reads the target's
+    /// entitlements and takes over when it finds CloudKit there. This target
+    /// links the app and so carries `Resources/Toehold.entitlements`, which
+    /// declares `com.apple.developer.icloud-services: CloudKit` — so every
+    /// container built here was a CloudKit container. A simulator with no
+    /// iCloud account signed in cannot bring that stack up, and it does not
+    /// fail: it waits. Four to eight seconds later the test was killed and the
+    /// run reported
     ///
-    /// `isStoredInMemoryOnly: true` does not make the file irrelevant: SwiftData
-    /// still derives a path from the schema, and two containers on one path
-    /// collide. A unique url per test removes the collision at the source.
+    ///     Restarting after unexpected exit, crash, or test timeout
     ///
-    /// The file is deleted on the way out, so a red test does not leave a store
-    /// behind for the next run to trip over.
+    /// naming no test and printing nothing. The word "timeout" was in that line
+    /// the whole time.
+    ///
+    /// This is what separated TaskStoreTests from StepGeneratorFactoryTests:
+    /// the latter is pure functions, finished in 0.001s, and never builds a
+    /// container. Nothing about the app's own container is changed -- it keeps
+    /// `.automatic`, which is what makes sync work on a real device.
+    ///
+    /// The url is unique per test so two containers never share a store path,
+    /// and `isStoredInMemoryOnly` keeps it off disk regardless.
     private func makeStore() throws -> TaskStore {
         let schema = Schema([TaskItem.self, StepItem.self])
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("ToeholdTests-\(UUID().uuidString).store")
         let container = try ModelContainer(
             for: schema,
-            configurations: ModelConfiguration(schema: schema, url: url)
+            configurations: ModelConfiguration(
+                schema: schema,
+                url: url,
+                isStoredInMemoryOnly: true,
+                cloudKitDatabase: .none
+            )
         )
         return TaskStore(context: container.mainContext)
     }

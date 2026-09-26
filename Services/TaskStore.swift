@@ -144,15 +144,10 @@ final class TaskStore {
             // A failed save with CloudKit configured is usually the network,
             // and SwiftData retries on the next change. Surfacing an alert here
             // would put an error in front of someone mid-task for something
-            // that resolves itself, so the person is not interrupted.
-            //
-            // It is logged rather than asserted. `assertionFailure` traps in a
-            // Debug build, which is the build the tests run: a container that
-            // could not save killed the test process before it could report
-            // anything, so eight failing tests presented as one silent crash
-            // with no failing test named. A log line lets the run finish and
-            // say what went wrong.
-            print("SwiftData save failed: \(error)")
+            // that resolves itself, so it is swallowed on purpose. The cost is
+            // that a genuinely broken container looks like data not persisting
+            // across launches, which is what the log line is for.
+            assertionFailure("SwiftData save failed: \(error)")
         }
     }
 
