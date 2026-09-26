@@ -60,7 +60,29 @@ jobs:
         run: |
           echo "=== Available Xcode ==="
           ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none found)"
-          for xc in /Applications/Xcode*.app; do
+
+          # Newest first, and that ordering is the whole point of this step.
+          #
+          # Walking `/Applications/Xcode*.app` in shell glob order picks the
+          # *oldest* Xcode on the runner, because that list sorts
+          # Xcode_26.0.1 before Xcode_26.6. The runner carries fifteen of them.
+          # The archive then failed inside the asset catalog with
+          #
+          #     error: No simulator runtime version from ["23C54", "23E254a",
+          #     "23F77"] available to use with iphonesimulator SDK version 23A339
+          #
+          # which names no Xcode and reads like a corrupt asset catalog. It was
+          # Xcode 26.0.1's 23A339 SDK: the runner's installed simulator runtimes
+          # are all newer than the one that SDK expects, and the asset compiler
+          # needs a runtime matching the SDK it is building against. Nothing was
+          # wrong with the catalog, the signing, or the platform.
+          #
+          # Sorted by version rather than taken first, so this picks 26.6 on a
+          # runner that has it and shoulders aside a stale oldest install.
+          mapfile -t XCODES < <(ls -d /Applications/Xcode*.app 2>/dev/null |             sed 's|/Applications/Xcode[_]*||; s|\.app$||' |             awk '{print}' | sort -Vr | sed 's|^|/Applications/Xcode_|; s|$|.app|')
+
+          for xc in "${XCODES[@]}"; do
+            [ -d "$xc" ] || continue
             if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
               sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
               # Whether the platform is downloaded is a separate question from
@@ -68,9 +90,30 @@ jobs:
               # what makes a later "iOS 26.0 is not installed" traceable to the
               # Xcode it picked rather than to the archive step that reported it.
               platform=$(ls -d "$xc/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs"/iPhoneOS*.sdk 2>/dev/null | head -1 || true)
-              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed ($platform)" || echo "NOT downloaded")"
-              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed" || echo "NOT downloaded")"
+              # The SDK major has to be 26+, and the build still needs the
+              # platform on disk. Both are asked before this one is accepted:
+              # accepting an Xcode whose platform is missing only moves the
+              # failure to the archive, where it reads like a scheme problem.
+              if { [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; } && [ -n "$platform" ]; then
                 echo "Selected: $xc (iOS SDK $sdk)"
+                xcodebuild -version
+                exit 0
+              fi
+            fi
+          done
+
+          # Nothing met both conditions. Rather than fall through to whatever
+          # xcode-select happens to be on, take the newest Xcode that at least
+          # reports SDK 26+ and let the platform step below download what it
+          # needs -- that step installs into the *selected* Xcode.
+          echo "No Xcode with SDK 26+ and a downloaded platform; taking the newest 26+ anyway"
+          for xc in "${XCODES[@]}"; do
+            [ -d "$xc" ] || continue
+            if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
+              sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
+              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+                echo "Selected: $xc (iOS SDK $sdk, platform will be downloaded)"
                 xcodebuild -version
                 exit 0
               fi
@@ -310,7 +353,29 @@ jobs:
         run: |
           echo "=== Available Xcode ==="
           ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none found)"
-          for xc in /Applications/Xcode*.app; do
+
+          # Newest first, and that ordering is the whole point of this step.
+          #
+          # Walking `/Applications/Xcode*.app` in shell glob order picks the
+          # *oldest* Xcode on the runner, because that list sorts
+          # Xcode_26.0.1 before Xcode_26.6. The runner carries fifteen of them.
+          # The archive then failed inside the asset catalog with
+          #
+          #     error: No simulator runtime version from ["23C54", "23E254a",
+          #     "23F77"] available to use with iphonesimulator SDK version 23A339
+          #
+          # which names no Xcode and reads like a corrupt asset catalog. It was
+          # Xcode 26.0.1's 23A339 SDK: the runner's installed simulator runtimes
+          # are all newer than the one that SDK expects, and the asset compiler
+          # needs a runtime matching the SDK it is building against. Nothing was
+          # wrong with the catalog, the signing, or the platform.
+          #
+          # Sorted by version rather than taken first, so this picks 26.6 on a
+          # runner that has it and shoulders aside a stale oldest install.
+          mapfile -t XCODES < <(ls -d /Applications/Xcode*.app 2>/dev/null |             sed 's|/Applications/Xcode[_]*||; s|\.app$||' |             awk '{print}' | sort -Vr | sed 's|^|/Applications/Xcode_|; s|$|.app|')
+
+          for xc in "${XCODES[@]}"; do
+            [ -d "$xc" ] || continue
             if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
               sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
               # Whether the platform is downloaded is a separate question from
@@ -318,9 +383,30 @@ jobs:
               # what makes a later "iOS 26.0 is not installed" traceable to the
               # Xcode it picked rather than to the archive step that reported it.
               platform=$(ls -d "$xc/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs"/iPhoneOS*.sdk 2>/dev/null | head -1 || true)
-              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed ($platform)" || echo "NOT downloaded")"
-              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed" || echo "NOT downloaded")"
+              # The SDK major has to be 26+, and the build still needs the
+              # platform on disk. Both are asked before this one is accepted:
+              # accepting an Xcode whose platform is missing only moves the
+              # failure to the archive, where it reads like a scheme problem.
+              if { [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; } && [ -n "$platform" ]; then
                 echo "Selected: $xc (iOS SDK $sdk)"
+                xcodebuild -version
+                exit 0
+              fi
+            fi
+          done
+
+          # Nothing met both conditions. Rather than fall through to whatever
+          # xcode-select happens to be on, take the newest Xcode that at least
+          # reports SDK 26+ and let the platform step below download what it
+          # needs -- that step installs into the *selected* Xcode.
+          echo "No Xcode with SDK 26+ and a downloaded platform; taking the newest 26+ anyway"
+          for xc in "${XCODES[@]}"; do
+            [ -d "$xc" ] || continue
+            if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
+              sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
+              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+                echo "Selected: $xc (iOS SDK $sdk, platform will be downloaded)"
                 xcodebuild -version
                 exit 0
               fi
@@ -719,7 +805,29 @@ jobs:
         run: |
           echo "=== Available Xcode ==="
           ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none found)"
-          for xc in /Applications/Xcode*.app; do
+
+          # Newest first, and that ordering is the whole point of this step.
+          #
+          # Walking `/Applications/Xcode*.app` in shell glob order picks the
+          # *oldest* Xcode on the runner, because that list sorts
+          # Xcode_26.0.1 before Xcode_26.6. The runner carries fifteen of them.
+          # The archive then failed inside the asset catalog with
+          #
+          #     error: No simulator runtime version from ["23C54", "23E254a",
+          #     "23F77"] available to use with iphonesimulator SDK version 23A339
+          #
+          # which names no Xcode and reads like a corrupt asset catalog. It was
+          # Xcode 26.0.1's 23A339 SDK: the runner's installed simulator runtimes
+          # are all newer than the one that SDK expects, and the asset compiler
+          # needs a runtime matching the SDK it is building against. Nothing was
+          # wrong with the catalog, the signing, or the platform.
+          #
+          # Sorted by version rather than taken first, so this picks 26.6 on a
+          # runner that has it and shoulders aside a stale oldest install.
+          mapfile -t XCODES < <(ls -d /Applications/Xcode*.app 2>/dev/null |             sed 's|/Applications/Xcode[_]*||; s|\.app$||' |             awk '{print}' | sort -Vr | sed 's|^|/Applications/Xcode_|; s|$|.app|')
+
+          for xc in "${XCODES[@]}"; do
+            [ -d "$xc" ] || continue
             if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
               sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
               # Whether the platform is downloaded is a separate question from
@@ -727,9 +835,30 @@ jobs:
               # what makes a later "iOS 26.0 is not installed" traceable to the
               # Xcode it picked rather than to the archive step that reported it.
               platform=$(ls -d "$xc/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs"/iPhoneOS*.sdk 2>/dev/null | head -1 || true)
-              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed ($platform)" || echo "NOT downloaded")"
-              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed" || echo "NOT downloaded")"
+              # The SDK major has to be 26+, and the build still needs the
+              # platform on disk. Both are asked before this one is accepted:
+              # accepting an Xcode whose platform is missing only moves the
+              # failure to the archive, where it reads like a scheme problem.
+              if { [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; } && [ -n "$platform" ]; then
                 echo "Selected: $xc (iOS SDK $sdk)"
+                xcodebuild -version
+                exit 0
+              fi
+            fi
+          done
+
+          # Nothing met both conditions. Rather than fall through to whatever
+          # xcode-select happens to be on, take the newest Xcode that at least
+          # reports SDK 26+ and let the platform step below download what it
+          # needs -- that step installs into the *selected* Xcode.
+          echo "No Xcode with SDK 26+ and a downloaded platform; taking the newest 26+ anyway"
+          for xc in "${XCODES[@]}"; do
+            [ -d "$xc" ] || continue
+            if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
+              sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
+              if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
+                echo "Selected: $xc (iOS SDK $sdk, platform will be downloaded)"
                 xcodebuild -version
                 exit 0
               fi
