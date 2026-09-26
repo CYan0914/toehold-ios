@@ -63,7 +63,12 @@ jobs:
           for xc in /Applications/Xcode*.app; do
             if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
               sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
-              echo "  $xc -> iOS SDK $sdk"
+              # Whether the platform is downloaded is a separate question from
+              # what `--show-sdk-version` answers, and printing both here is
+              # what makes a later "iOS 26.0 is not installed" traceable to the
+              # Xcode it picked rather than to the archive step that reported it.
+              platform=$(ls -d "$xc/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs"/iPhoneOS*.sdk 2>/dev/null | head -1 || true)
+              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed ($platform)" || echo "NOT downloaded")"
               if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
                 echo "Selected: $xc (iOS SDK $sdk)"
                 xcodebuild -version
@@ -308,7 +313,12 @@ jobs:
           for xc in /Applications/Xcode*.app; do
             if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
               sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
-              echo "  $xc -> iOS SDK $sdk"
+              # Whether the platform is downloaded is a separate question from
+              # what `--show-sdk-version` answers, and printing both here is
+              # what makes a later "iOS 26.0 is not installed" traceable to the
+              # Xcode it picked rather than to the archive step that reported it.
+              platform=$(ls -d "$xc/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs"/iPhoneOS*.sdk 2>/dev/null | head -1 || true)
+              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed ($platform)" || echo "NOT downloaded")"
               if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
                 echo "Selected: $xc (iOS SDK $sdk)"
                 xcodebuild -version
@@ -344,18 +354,34 @@ jobs:
           sudo xcodebuild -license accept 2>&1 || true
           sudo xcodebuild -runFirstLaunch 2>&1 || true
 
-          # The archive needs the device SDK, and the check below is the one
-          # that says whether it arrived. The loop used to exhaust its retries,
-          # print a version string and exit 0 -- so a runner that never got the
-          # platform failed later at the archive with
+          # The archive needs the device platform actually installed, and the
+          # check that used to stand here could not tell that apart from the
+          # SDK Xcode ships inside its own bundle.
+          #
+          # It read `xcrun --sdk iphoneos --show-sdk-version`. On a runner whose
+          # Xcode 26.0.1 has no iOS 26 platform downloaded, that command still
+          # prints a version -- it reads the stub inside the .app -- so the
+          # guard said "already present" and skipped the download. The archive
+          # then failed with
           #
           #     Unable to find a destination matching the provided destination
           #     specifier ... error: iOS 26.0 is not installed
           #
-          # which names the destination specifier and is really about the SDK.
-          if xcrun --sdk iphoneos --show-sdk-version > /dev/null 2>&1; then
-            echo "iOS device SDK already present: $(xcrun --sdk iphoneos --show-sdk-version)"
+          # and every check above it had passed, including the destination one.
+          # A check that answers a different question than the one being asked
+          # is worse than no check: it turns a missing download into a mystery
+          # two steps later.
+          #
+          # What is actually being asked is whether the platform is on disk.
+          # `-downloadPlatform` installs into the selected Xcode's
+          # iPhoneOS.platform, so that directory is the question.
+          DEVELOPER_DIR=$(xcode-select -p)
+          DEVICE_SDK_DIR="$DEVELOPER_DIR/Platforms/iPhoneOS.platform/Developer/SDKs"
+
+          if ls "$DEVICE_SDK_DIR"/iPhoneOS*.sdk > /dev/null 2>&1; then
+            echo "device platform present: $(ls -d "$DEVICE_SDK_DIR"/iPhoneOS*.sdk)"
           else
+            echo "no device platform under $DEVICE_SDK_DIR -- downloading"
             for i in 1 2 3; do
               echo "Attempt $i..."
               # No pipe on the xcodebuild call itself: `cmd | tail` returns
@@ -367,18 +393,19 @@ jobs:
             done
           fi
 
-          if ! xcrun --sdk iphoneos --show-sdk-version > /dev/null 2>&1; then
-            echo "::error::no iOS device SDK after three download attempts"
+          if ! ls "$DEVICE_SDK_DIR"/iPhoneOS*.sdk > /dev/null 2>&1; then
+            echo "::error::no device platform under $DEVICE_SDK_DIR after three download attempts"
+            echo "--- what is there ---"
+            ls -la "$DEVELOPER_DIR/Platforms/iPhoneOS.platform/Developer/" 2>&1 || true
             xcodebuild -version || true
             exit 1
           fi
           xcodebuild -version
-          echo "iOS device SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "device platform SDK: $(ls -d "$DEVICE_SDK_DIR"/iPhoneOS*.sdk)"
 
-          # The SDK version above is not the same question as "can this archive
-          # find a destination", and the run that proved it had the SDK present
-          # and still reported "Found no destinations". So the destination is
-          # asked for directly, by the same xcodebuild that will do the archiving.
+          # Kept, because "the platform is on disk" and "xcodebuild can find a
+          # destination for it" are still two questions. This one is answered
+          # by the same xcodebuild that will do the archiving.
           if ! xcodebuild -showdestinations -project Toehold.xcodeproj -scheme Toehold 2>&1 \
                | grep -q "platform:iOS,"; then
             echo "::error::xcodebuild sees no generic iOS device destination"
@@ -695,7 +722,12 @@ jobs:
           for xc in /Applications/Xcode*.app; do
             if sudo xcode-select -s "$xc/Contents/Developer" 2>/dev/null; then
               sdk=$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "unknown")
-              echo "  $xc -> iOS SDK $sdk"
+              # Whether the platform is downloaded is a separate question from
+              # what `--show-sdk-version` answers, and printing both here is
+              # what makes a later "iOS 26.0 is not installed" traceable to the
+              # Xcode it picked rather than to the archive step that reported it.
+              platform=$(ls -d "$xc/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs"/iPhoneOS*.sdk 2>/dev/null | head -1 || true)
+              echo "  $xc -> iOS SDK $sdk | platform $([ -n "$platform" ] && echo "installed ($platform)" || echo "NOT downloaded")"
               if [[ "$sdk" == 2[6-9].* ]] || [[ "$sdk" == [3-9]* ]]; then
                 echo "Selected: $xc (iOS SDK $sdk)"
                 xcodebuild -version
