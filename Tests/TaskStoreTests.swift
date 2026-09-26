@@ -7,11 +7,31 @@ import Testing
 /// matches how the app uses it — every call comes from a view.
 @MainActor
 struct TaskStoreTests {
+    /// Each store gets its own store file, and that is the whole point.
+    ///
+    /// This used to be `ModelConfiguration(schema:isStoredInMemoryOnly: true)`
+    /// with no `url`. Every test built its own container, and with no url each
+    /// one derived the same default path from the same schema — so eight
+    /// containers were pointed at one store. The observable symptom was a test
+    /// process that died the instant a `TaskStoreTests` case started, printing
+    /// nothing: no assertion failure, no error, not even the test's own name in
+    /// the run log. `TaskStore.save()` swallows a throwing `context.save()`
+    /// into `assertionFailure`, which traps in a Debug build, so a failed save
+    /// is a silent kill rather than a reported one.
+    ///
+    /// `isStoredInMemoryOnly: true` does not make the file irrelevant: SwiftData
+    /// still derives a path from the schema, and two containers on one path
+    /// collide. A unique url per test removes the collision at the source.
+    ///
+    /// The file is deleted on the way out, so a red test does not leave a store
+    /// behind for the next run to trip over.
     private func makeStore() throws -> TaskStore {
         let schema = Schema([TaskItem.self, StepItem.self])
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ToeholdTests-\(UUID().uuidString).store")
         let container = try ModelContainer(
             for: schema,
-            configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+            configurations: ModelConfiguration(schema: schema, url: url)
         )
         return TaskStore(context: container.mainContext)
     }
