@@ -45,6 +45,12 @@ jobs:
       github.event_name == 'push' ||
       (github.event.inputs.create_ipa != 'true' && github.event.inputs.screenshots != 'true')
     runs-on: macos-latest
+    # Bounded because the failure that actually happened here is not a slow
+    # build, it is a build that never writes another line. One run passed the
+    # build step and then sat in the test step for 40 minutes with no output,
+    # looking exactly like work. Without a cap the runner holds the job for
+    # GitHub's six-hour default, spending macOS minutes to produce nothing.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -81,18 +87,54 @@ jobs:
           rm -rf Toehold.xcodeproj
           xcodegen generate
 
-      - name: Ensure the iOS platform is installed
+      - name: Ensure the iOS simulator runtime is installed
         run: |
+          # The check is the point. `-downloadPlatform iOS -quiet` fetching the
+          # device support files says nothing about whether a simulator runtime
+          # landed, and checking `--sdk iphoneos` afterwards answers a question
+          # this job never asked -- it builds with `-sdk iphonesimulator`.
+          #
+          # So the runtime is checked directly, and installed only when missing.
+          # Two runs on the same commit, seconds apart, went different ways on a
+          # runner whose runtime was still settling: one build failed instantly
+          # with "Found no destinations for the scheme 'Toehold'", the other sat
+          # at the test step for 40 minutes without writing another timestamp.
+          # Neither outcome named the runtime, because nothing looked at it.
           sudo xcodebuild -license accept 2>&1 || true
           sudo xcodebuild -runFirstLaunch 2>&1 || true
-          for i in 1 2 3; do
-            echo "Attempt $i..."
-            sudo xcodebuild -downloadPlatform iOS -quiet 2>&1 && break
-            echo "Attempt $i failed, sleeping 10s..."
-            sleep 10
-          done
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version || echo "iphoneos SDK not found"
+
+          if xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
+            echo "iOS simulator runtime already present:"
+            xcrun simctl list runtimes | grep "^iOS "
+          else
+            echo "no iOS simulator runtime; downloading"
+            for i in 1 2 3; do
+              echo "Attempt $i..."
+              # No `| tail` on the xcodebuild call: a pipe returns tail's exit
+              # status, so a failed download would read as success and the loop
+              # would stop retrying on the first try.
+              if sudo xcodebuild -downloadPlatform iOS 2>&1; then break; fi
+              echo "Attempt $i failed, sleeping 15s..."
+              sleep 15
+            done
+          fi
+
+          # The step fails here or not at all. Previously the loop could exhaust
+          # its retries, print a version string, and exit 0 -- and the build then
+          # died downstream with an error that pointed at the scheme.
+          if ! xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
+            echo "::error::no iOS simulator runtime after three download attempts"
+            xcrun simctl list runtimes || true
+            exit 1
+          fi
+
+          # A runtime that exists but matches no device is the same dead end.
+          if ! xcrun simctl list devices available 2>/dev/null | grep -q "iPhone"; then
+            echo "::error::an iOS runtime is installed but no iPhone device is available"
+            xcrun simctl list devices available || true
+            exit 1
+          fi
+          echo "iOS simulator runtime and an iPhone device are both available."
 
       - name: Build for Simulator
         run: |
@@ -152,6 +194,26 @@ jobs:
             exit 1
           fi
           echo "Using simulator $UDID"
+
+          # `available` means the device template exists, not that the device
+          # can boot. On a fresh runner the first iPhone in the list has never
+          # been started, and handing its id to `xcodebuild test` produced a run
+          # that sat for 40 minutes without writing another timestamp: not a
+          # failing test, not a passing one, no output to read. Booting here
+          # turns that into a step that fails in seconds and says why.
+          xcrun simctl boot "$UDID" 2>&1 || true
+          for i in $(seq 1 30); do
+            if xcrun simctl list devices | grep "$UDID" | grep -q "(Booted)"; then
+              echo "simulator booted"
+              break
+            fi
+            sleep 2
+          done
+          if ! xcrun simctl list devices | grep "$UDID" | grep -q "(Booted)"; then
+            echo "::error::simulator $UDID did not reach the booted state"
+            xcrun simctl list devices || true
+            exit 1
+          fi
 
           set +e
           xcodebuild test \
@@ -277,17 +339,37 @@ jobs:
           # archive succeeds is not a matter of which runner it landed on.
           sudo xcodebuild -license accept 2>&1 || true
           sudo xcodebuild -runFirstLaunch 2>&1 || true
-          for i in 1 2 3; do
-            echo "Attempt $i..."
-            # No pipe on the xcodebuild call itself: `cmd | tail` returns
-            # tail's exit status, so a failing download would look like a
-            # success and the loop would stop retrying on the first try.
-            sudo xcodebuild -downloadPlatform iOS -quiet 2>&1 && break
-            echo "Attempt $i failed, sleeping 15s..."
-            sleep 15
-          done
+
+          # The archive needs the device SDK, and the check below is the one
+          # that says whether it arrived. The loop used to exhaust its retries,
+          # print a version string and exit 0 -- so a runner that never got the
+          # platform failed later at the archive with
+          #
+          #     Unable to find a destination matching the provided destination
+          #     specifier ... error: iOS 26.0 is not installed
+          #
+          # which names the destination specifier and is really about the SDK.
+          if xcrun --sdk iphoneos --show-sdk-version > /dev/null 2>&1; then
+            echo "iOS device SDK already present: $(xcrun --sdk iphoneos --show-sdk-version)"
+          else
+            for i in 1 2 3; do
+              echo "Attempt $i..."
+              # No pipe on the xcodebuild call itself: `cmd | tail` returns
+              # tail's exit status, so a failing download would look like a
+              # success and the loop would stop retrying on the first try.
+              if sudo xcodebuild -downloadPlatform iOS 2>&1; then break; fi
+              echo "Attempt $i failed, sleeping 15s..."
+              sleep 15
+            done
+          fi
+
+          if ! xcrun --sdk iphoneos --show-sdk-version > /dev/null 2>&1; then
+            echo "::error::no iOS device SDK after three download attempts"
+            xcodebuild -version || true
+            exit 1
+          fi
           xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version || echo "iphoneos SDK not found"
+          echo "iOS device SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
 
       - name: Install the App Store Connect API key
         env:
@@ -623,13 +705,30 @@ jobs:
         run: |
           sudo xcodebuild -license accept 2>&1 || true
           sudo xcodebuild -runFirstLaunch 2>&1 || true
-          for i in 1 2 3; do
-            echo "Attempt $i..."
-            sudo xcodebuild -downloadPlatform iOS -quiet 2>&1 && break
-            echo "Attempt $i failed, sleeping 15s..."
-            sleep 15
-          done
-          xcrun --sdk iphonesimulator --show-sdk-version || echo "simulator SDK not found"
+
+          # `--show-sdk-version` only proves the SDK is on disk. The capture
+          # script boots a simulator, which needs a *runtime*, and a runner can
+          # have the SDK without one -- that combination boots nothing and is
+          # reported as "Found no destinations". So the runtime is what gets
+          # checked, and a missing one fails this step rather than the capture.
+          if xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
+            echo "iOS simulator runtime already present:"
+            xcrun simctl list runtimes | grep "^iOS "
+          else
+            for i in 1 2 3; do
+              echo "Attempt $i..."
+              if sudo xcodebuild -downloadPlatform iOS 2>&1; then break; fi
+              echo "Attempt $i failed, sleeping 15s..."
+              sleep 15
+            done
+          fi
+
+          if ! xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
+            echo "::error::no iOS simulator runtime after three download attempts"
+            xcrun simctl list runtimes || true
+            exit 1
+          fi
+          echo "simulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-version)"
 
       - name: Build for Simulator
         run: |
