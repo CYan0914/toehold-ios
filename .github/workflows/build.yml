@@ -89,52 +89,56 @@ jobs:
 
       - name: Ensure the iOS simulator runtime is installed
         run: |
-          # The check is the point. `-downloadPlatform iOS -quiet` fetching the
-          # device support files says nothing about whether a simulator runtime
-          # landed, and checking `--sdk iphoneos` afterwards answers a question
-          # this job never asked -- it builds with `-sdk iphonesimulator`.
+          # The download is unconditional, and that is not laziness.
           #
-          # So the runtime is checked directly, and installed only when missing.
-          # Two runs on the same commit, seconds apart, went different ways on a
-          # runner whose runtime was still settling: one build failed instantly
-          # with "Found no destinations for the scheme 'Toehold'", the other sat
-          # at the test step for 40 minutes without writing another timestamp.
-          # Neither outcome named the runtime, because nothing looked at it.
+          # `simctl list runtimes` was tried as a guard here -- skip the download
+          # when a runtime is already listed -- and it broke the build. The
+          # runner carries 14 Xcodes (26.0.1 through 26.6); `xcrun simctl` reads
+          # the CoreSimulator service's runtime pool, which was populated by a
+          # different Xcode than the one `xcode-select` just switched to. So the
+          # guard saw an iOS runtime, skipped the download, and reported success
+          # in five seconds -- and the build then died on
+          #
+          #     xcodebuild: error: Found no destinations for the scheme 'Toehold'
+          #
+          # because Xcode_26.0.1's own view of its runtimes was empty. The old
+          # unconditional download was doing the real work; the guard removed it.
+          # Comparing the two runs side by side is what made that plain: the one
+          # that worked spent 4m55s in this step, the one that failed spent 5s.
           sudo xcodebuild -license accept 2>&1 || true
           sudo xcodebuild -runFirstLaunch 2>&1 || true
 
-          if xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
-            echo "iOS simulator runtime already present:"
-            xcrun simctl list runtimes | grep "^iOS "
-          else
-            echo "no iOS simulator runtime; downloading"
-            for i in 1 2 3; do
-              echo "Attempt $i..."
-              # No `| tail` on the xcodebuild call: a pipe returns tail's exit
-              # status, so a failed download would read as success and the loop
-              # would stop retrying on the first try.
-              if sudo xcodebuild -downloadPlatform iOS 2>&1; then break; fi
-              echo "Attempt $i failed, sleeping 15s..."
-              sleep 15
-            done
-          fi
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            # No `| tail` on the xcodebuild call: a pipe returns tail's exit
+            # status, so a failed download would read as success and the loop
+            # would stop retrying on the first try. `sudo` matters too -- it is
+            # what resolves xcodebuild through xcode-select to the Xcode chosen
+            # above, rather than to whichever one the runner defaulted to.
+            if sudo xcodebuild -downloadPlatform iOS 2>&1; then break; fi
+            echo "Attempt $i failed, sleeping 15s..."
+            sleep 15
+          done
 
-          # The step fails here or not at all. Previously the loop could exhaust
-          # its retries, print a version string, and exit 0 -- and the build then
-          # died downstream with an error that pointed at the scheme.
-          if ! xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
-            echo "::error::no iOS simulator runtime after three download attempts"
+          # What changes is only this: the step now fails here or not at all.
+          # Before, the loop could exhaust its retries, print a version string
+          # and exit 0, and the build then died downstream with an error naming
+          # the scheme instead of the missing platform.
+          #
+          # Checked with xcodebuild rather than simctl, deliberately: simctl
+          # answers from the service pool and said "present" in the very run
+          # where xcodebuild said "no destinations". The question worth asking
+          # is the one xcodebuild will ask.
+          if ! xcodebuild -showdestinations -project Toehold.xcodeproj -scheme Toehold 2>&1 \
+               | grep -q "platform:iOS Simulator"; then
+            echo "::error::xcodebuild sees no iOS Simulator destination after three download attempts"
+            echo "--- xcodebuild -showdestinations ---"
+            xcodebuild -showdestinations -project Toehold.xcodeproj -scheme Toehold 2>&1 || true
+            echo "--- simctl runtimes (for contrast; this is the pool simctl reads) ---"
             xcrun simctl list runtimes || true
             exit 1
           fi
-
-          # A runtime that exists but matches no device is the same dead end.
-          if ! xcrun simctl list devices available 2>/dev/null | grep -q "iPhone"; then
-            echo "::error::an iOS runtime is installed but no iPhone device is available"
-            xcrun simctl list devices available || true
-            exit 1
-          fi
-          echo "iOS simulator runtime and an iPhone device are both available."
+          echo "xcodebuild reports an iOS Simulator destination."
 
       - name: Build for Simulator
         run: |
@@ -370,6 +374,17 @@ jobs:
           fi
           xcodebuild -version
           echo "iOS device SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+
+          # The SDK version above is not the same question as "can this archive
+          # find a destination", and the run that proved it had the SDK present
+          # and still reported "Found no destinations". So the destination is
+          # asked for directly, by the same xcodebuild that will do the archiving.
+          if ! xcodebuild -showdestinations -project Toehold.xcodeproj -scheme Toehold 2>&1 \
+               | grep -q "platform:iOS,"; then
+            echo "::error::xcodebuild sees no generic iOS device destination"
+            xcodebuild -showdestinations -project Toehold.xcodeproj -scheme Toehold 2>&1 || true
+            exit 1
+          fi
 
       - name: Install the App Store Connect API key
         env:
@@ -706,26 +721,24 @@ jobs:
           sudo xcodebuild -license accept 2>&1 || true
           sudo xcodebuild -runFirstLaunch 2>&1 || true
 
-          # `--show-sdk-version` only proves the SDK is on disk. The capture
-          # script boots a simulator, which needs a *runtime*, and a runner can
-          # have the SDK without one -- that combination boots nothing and is
-          # reported as "Found no destinations". So the runtime is what gets
-          # checked, and a missing one fails this step rather than the capture.
-          if xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
-            echo "iOS simulator runtime already present:"
-            xcrun simctl list runtimes | grep "^iOS "
-          else
-            for i in 1 2 3; do
-              echo "Attempt $i..."
-              if sudo xcodebuild -downloadPlatform iOS 2>&1; then break; fi
-              echo "Attempt $i failed, sleeping 15s..."
-              sleep 15
-            done
-          fi
+          # Unconditional, for the reason spelled out in the build job: simctl
+          # lists runtimes out of the CoreSimulator service pool, which does not
+          # track the Xcode that `xcode-select` just switched to, so it reports
+          # runtimes the chosen Xcode cannot use. A guard built on it skipped
+          # this download and cost a build.
+          for i in 1 2 3; do
+            echo "Attempt $i..."
+            if sudo xcodebuild -downloadPlatform iOS 2>&1; then break; fi
+            echo "Attempt $i failed, sleeping 15s..."
+            sleep 15
+          done
 
-          if ! xcrun simctl list runtimes 2>/dev/null | grep -q "^iOS "; then
-            echo "::error::no iOS simulator runtime after three download attempts"
-            xcrun simctl list runtimes || true
+          # The capture script boots a simulator, so what matters is that the
+          # chosen Xcode can see one. Asked of xcodebuild, not simctl.
+          if ! xcodebuild -showdestinations -project Toehold.xcodeproj -scheme Toehold 2>&1 \
+               | grep -q "platform:iOS Simulator"; then
+            echo "::error::xcodebuild sees no iOS Simulator destination after three download attempts"
+            xcodebuild -showdestinations -project Toehold.xcodeproj -scheme Toehold 2>&1 || true
             exit 1
           fi
           echo "simulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-version)"
