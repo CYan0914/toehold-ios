@@ -28,17 +28,20 @@ struct TaskStoreTests {
     /// container. Nothing about the app's own container is changed -- it keeps
     /// `.automatic`, which is what makes sync work on a real device.
     ///
-    /// The url is unique per test so two containers never share a store path,
-    /// and `isStoredInMemoryOnly` keeps it off disk regardless.
+    /// In-memory, so there is no store path to collide over.
+    ///
+    /// `url:` and `isStoredInMemoryOnly:` belong to two different initializers
+    /// and cannot be passed together -- attempting it is what broke the build
+    /// on the previous attempt, and the compiler's complaint named the other
+    /// signature rather than the mistake. The in-memory one is the one that
+    /// matches what these tests want: no file, nothing to share, nothing left
+    /// behind after a failure.
     private func makeStore() throws -> TaskStore {
         let schema = Schema([TaskItem.self, StepItem.self])
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ToeholdTests-\(UUID().uuidString).store")
         let container = try ModelContainer(
             for: schema,
             configurations: ModelConfiguration(
                 schema: schema,
-                url: url,
                 isStoredInMemoryOnly: true,
                 cloudKitDatabase: .none
             )
